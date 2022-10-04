@@ -60,7 +60,7 @@ def sort_classes(classes):
     lst = list(classes)
     for cls in lst:
         cldeps = []
-        cllist=[]
+        cllist = []
         if hasattr(cls, "_get_inner_types"):
             cllist.extend(cls._get_inner_types())
         if hasattr(cls, "_depends_on"):
@@ -306,11 +306,11 @@ class XBuffer(ABC):
 
     @abstractmethod
     def copy_to_native(self, dest, dest_offset, source_offset, nbytes):
-        """copy data from self.buffer into dest"""
+        """Copy data from self.buffer into dest"""
 
     @abstractmethod
-    def copy_native(self, offset, nbytes):
-        """return native data with content at from offset and nbytes"""
+    def to_native(self, offset, nbytes):
+        """Return native data with content at from offset and nbytes"""
 
     @abstractmethod
     def update_from_buffer(self, offset, source):
@@ -318,22 +318,22 @@ class XBuffer(ABC):
 
     @abstractmethod
     def to_nplike(self, offset, dtype, shape):
-        """view in nplike"""
+        """Return a view in of an nplike"""
 
     @abstractmethod
     def update_from_nplike(self, offset, dest_dtype, value):
-        """update data from nplike matching dest_dtype"""
+        """Copy data from nplike matching dest_dtype"""
 
     @abstractmethod
     def to_bytearray(self, offset, nbytes):
-        """copy in byte array: used in update_from_xbuffer"""
+        """Return a byte array: used in update_from_xbuffer"""
 
     @abstractmethod
     def to_pointer_arg(self, offset, nbytes):
-        """return data that can be used as argument in kernel"""
+        """Return data that can be used as argument in kernel"""
 
     def update_from_xbuffer(self, offset, source, source_offset, nbytes):
-        """update from any xbuffer, don't pass through gpu if possible"""
+        """Copy data from any xbuffer, don't pass through cpu if possible"""
         if source.context == self.context:
             self.update_from_native(
                 offset, source.buffer, source_offset, nbytes
@@ -418,10 +418,12 @@ class Kernel:
             classes.append(self.ret.atype)
         return classes
 
+
 class Source:
     def __init__(self, source, name=None):
         self.source = source
         self.name = name
+
 
 class Method:
     def __init__(self, args, c_name, ret):
@@ -478,7 +480,7 @@ def get_test_contexts():
     ctxstr = os.environ.get("XOBJECTS_TEST_CONTEXTS")
     if ctxstr is None:
         yield xo.ContextCpu()
-        #yield xo.ContextCpu(omp_num_threads=2)
+        # yield xo.ContextCpu(omp_num_threads=2)
         if xo.ContextCupy in xo.context.available:
             yield xo.ContextCupy()
         if xo.ContextPyopencl in xo.context.available:

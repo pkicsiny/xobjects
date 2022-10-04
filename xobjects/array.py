@@ -9,7 +9,7 @@ import numpy as np
 
 
 from .typeutils import (
-    get_a_buffer,
+    allocate_on_buffer,
     Info,
     is_integer,
     _to_slot_size,
@@ -292,7 +292,7 @@ class Array(metaclass=MetaArray):
         - offsets
         - value: None if args contains dimensions else args[0]
         """
-        log.debug(f"get size for {cls} from {args}")
+        # log.debug(f"get size for {cls} from {args}")
         info = Info()
         extra = {}
         if cls._size is not None:
@@ -392,7 +392,7 @@ class Array(metaclass=MetaArray):
         return info
 
     @classmethod
-    def _from_buffer(cls, buffer, offset):
+    def _from_buffer(cls, buffer, offset=0):
         self = object.__new__(cls)
         self._buffer = buffer
         self._offset = offset
@@ -504,7 +504,7 @@ class Array(metaclass=MetaArray):
         cls = self.__class__
         info = cls._inspect_args(*args)
 
-        self._buffer, self._offset = get_a_buffer(
+        self._buffer, self._offset = allocate_on_buffer(
             info.size, _context, _buffer, _offset
         )
 

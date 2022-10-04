@@ -7,13 +7,13 @@ import logging
 
 import numpy as np
 
-from .typeutils import Info, dispatch_arg, get_a_buffer, default_conf
+from .typeutils import Info, dispatch_arg, allocate_on_buffer, default_conf
 from .scalar import Int64
 from .array import Array
 
 log = logging.getLogger(__name__)
 
-NULLVALUE = -(2 ** 63)
+NULLVALUE = -(2**63)
 NULLTYPE = -1
 NULLREF = np.array([NULLVALUE, NULLTYPE], dtype="int64")
 
@@ -28,13 +28,18 @@ class Ref(metaclass=MetaRef):
     _has_refs = True
 
     def __init__(self, reftype):
-        self._reftype = reftype
+
+        if hasattr(reftype, "_XoStruct"):
+            self._reftype = reftype._XoStruct
+        else:
+            self._reftype = reftype
+
         self.__name__ = "Ref" + self._reftype.__name__
         self._c_type = self.__name__
 
         self._size = 8
 
-    def _from_buffer(self, buffer, offset):
+    def _from_buffer(self, buffer, offset=0):
         refoffset = Int64._from_buffer(buffer, offset)
         if refoffset == NULLVALUE:
             return None
@@ -110,7 +115,7 @@ class MetaUnionRef(type):
         if "_methods" not in data:
             data["_methods"] = []
 
-        data['_has_refs'] = True
+        data["_has_refs"] = True
 
         return type.__new__(cls, name, bases, data)
 
@@ -149,7 +154,7 @@ class MetaUnionRef(type):
         # If no match found:
         raise TypeError(f"Invalid id: {typeid}!")
 
-    def _from_buffer(cls, buffer, offset):
+    def _from_buffer(cls, buffer, offset=0):
         refoffset, typeid = Int64._array_from_buffer(buffer, offset, 2)
         if refoffset == NULLVALUE:
             return None
@@ -167,7 +172,7 @@ class MetaUnionRef(type):
         - XObject
         - typename, dict
         """
-        log.debug(f"get info for {cls} from {args}")
+        # log.debug(f"get info for {cls} from {args}")
         info = Info(size=cls._size)
         return info
 
@@ -230,7 +235,7 @@ class UnionRef(metaclass=MetaUnionRef):
 
         args, _ = self._pre_init(*args, **kwargs)
 
-        self._buffer, self._offset = get_a_buffer(
+        self._buffer, self._offset = allocate_on_buffer(
             cls._size, _context, _buffer, _offset
         )
 

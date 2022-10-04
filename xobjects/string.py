@@ -31,7 +31,7 @@ TODO:
 - consider adding size in the class
 """
 
-from .typeutils import get_a_buffer, Info, _to_slot_size, is_integer
+from .typeutils import allocate_on_buffer, Info, _to_slot_size, is_integer
 
 from .scalar import Int64
 from .array import Array
@@ -62,7 +62,7 @@ class MetaString(type):
             return Info(size=cls._size)
 
     def _to_buffer(cls, buffer, offset, value, info=None):
-        log.debug(f"{cls} to buffer {offset}  `{value}`")
+        # log.debug(f"{cls} to buffer {offset}  `{value}`")
         if info is None:
             info = cls._inspect_args(value)
         size = info.size
@@ -76,7 +76,7 @@ class MetaString(type):
             data = info.data
             off = string_capacity - len(data)
             data += b"\x00" * off
-            log.debug(f"to_buffer {offset+8} {len(data)} {string_capacity}")
+            # log.debug(f"to_buffer {offset+8} {len(data)} {string_capacity}")
             buffer.update_from_buffer(offset + 8, data)
         elif is_integer(value):
             pass
@@ -87,9 +87,9 @@ class MetaString(type):
         ll = Int64._from_buffer(buffer, offset)
         return buffer.to_bytearray(offset + 8, ll - 8)
 
-    def _from_buffer(cls, buffer, offset):
+    def _from_buffer(cls, buffer, offset=0, encoding="utf8"):
         # TODO keep in mind that in windows many funcitons returns wchar encoded in utf16
-        return cls._get_data(buffer, offset).decode("utf8").rstrip("\x00")
+        return cls._get_data(buffer, offset).decode(encoding).rstrip("\x00")
 
     def fixed(cls, size):
         if is_integer(size) and size > 0:
@@ -109,7 +109,7 @@ class String(metaclass=MetaString):
     ):
         info = self.__class__._inspect_args(string_or_int)
         size = info.size
-        self._buffer, self._offset = get_a_buffer(
+        self._buffer, self._offset = allocate_on_buffer(
             size, _context, _buffer, _offset
         )
 
