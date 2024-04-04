@@ -17,6 +17,7 @@ import numpy as np
 import scipy as sp
 
 _forbid_compile = False
+_suppress_warnings = False
 
 from .context import (
     Kernel,
@@ -145,6 +146,8 @@ class ContextCpu(XContext):
         """
         super().__init__()
         self.omp_num_threads = omp_num_threads
+        if omp_num_threads==0:
+            self.allow_prebuilt_kernels = True
 
     def __str__(self):
         if not self.openmp_enabled:
@@ -333,15 +336,14 @@ class ContextCpu(XContext):
             # Only kernel information, but no possibility to call the kernel
             out_kernels = {}
             for pyname, kernel in kernel_descriptions.items():
-                classes = tuple(kernel.description.get_overridable_classes())
-                out_kernels[(pyname, classes)] = KernelCpu(
+                out_kernels[pyname] = KernelCpu(
                     function=None,
                     description=kernel,
                     ffi_interface=None,
                     context=self,
                 )
 
-        for (pyname, _), kernel in out_kernels.items():
+        for pyname, kernel in out_kernels.items():
             kernel.source = source
             kernel.specialized_source = specialized_source
             # TODO: find better implementation?
@@ -367,8 +369,7 @@ class ContextCpu(XContext):
         )
         out_kernels = {}
         for pyname, kernel_desc in kernel_descriptions.items():
-            classes = tuple(kernel_desc.get_overridable_classes())
-            out_kernels[(pyname, classes)] = KernelCpu(
+            out_kernels[pyname] = KernelCpu(
                 function=getattr(module.lib, kernel_desc.c_name),
                 description=kernel_desc,
                 ffi_interface=module.ffi,
@@ -422,6 +423,10 @@ class ContextCpu(XContext):
             # TODO: to be handled properly
             xtr_compile_args = []
             xtr_link_args = []
+
+        if _suppress_warnings:
+            xtr_compile_args.append("-w")
+            xtr_link_args.append("-w")
 
         ffi_interface.set_source(
             module_name,
@@ -507,6 +512,22 @@ class ContextCpu(XContext):
             self.omp_get_max_threads = module.lib.omp_get_max_threads
 
         return module
+
+    @staticmethod
+    def cffi_module_for_c_types(c_types, containing_dir="."):
+        path = Path(containing_dir)
+        for file in path.iterdir():
+            if not file.suffix in ['.so', '.dylib', '.dll']:
+                continue
+            module_name = file.name.split('.')[0]
+            spec = importlib.util.spec_from_file_location(module_name, str(file))
+            module = importlib.util.module_from_spec(spec)
+
+            typedefs = module.ffi.list_types()[0]
+            if set(c_types) <= set(typedefs):
+                return module_name
+
+        return None
 
     def nparray_to_context_array(self, arr):
         """
