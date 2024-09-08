@@ -40,13 +40,17 @@ class _FieldOfDressed:
         if self.isnplikearray:
             self.__get__(container=container)[:] = value
         elif hasattr(value, "_xobject"):  # value is a dressed xobject
+
             # Copy xobject data from value inside self._xobject
             # (unless same memory area or Ref and same buffer,
             #  in the latter case reference mechanism is used)
             if not (
                 container._xobject._buffer is value._xobject._buffer
-                and getattr(container._xobject, self.name)._offset
-                == value._xobject._offset
+                and (
+                    getattr(container._xobject, self.name) is not None
+                    and getattr(container._xobject, self.name)._offset
+                    == value._xobject._offset
+                )
             ):
                 setattr(container._xobject, self.name, value._xobject)
 
@@ -198,15 +202,16 @@ class MetaHybridClass(type):
 class HybridClass(metaclass=MetaHybridClass):
     _movable = True
     _overridable = True
+    _force_moveable = False
 
     def move(self, _context=None, _buffer=None, _offset=None):
-        if not self._movable:
+        if not self._movable and not self._force_moveable:
             raise MemoryError(
                 "This object cannot be moved, likely because it "
                 "lives within another. Please, make a copy."
             )
 
-        if self._xobject._has_refs:
+        if self._xobject._has_refs and not self._force_moveable:
             raise MemoryError(
                 "This object cannot be moved, as it contains "
                 "references to other objects."
@@ -285,40 +290,49 @@ class HybridClass(metaclass=MetaHybridClass):
         else:
             obj = self
 
-        for ff in obj._fields:
-            if (
-                hasattr(self, "_skip_in_to_dict")
-                and ff in self._skip_in_to_dict
-            ):
-                continue
+        skip_fields = set(getattr(obj, "_skip_in_to_dict", []))
+        additional_fields = set(getattr(obj, "_store_in_to_dict", []))
+        fields_to_store = (set(obj._fields) - skip_fields) | additional_fields
+
+        defaults = {}
+        for field in obj._XoStruct._fields:
+            try:
+                defaults[field.name] = field.get_default()
+            except (TypeError, ValueError):
+                # The above can fail with different error types
+                # if a field type is dynamic.
+                pass
+
+        for ff in fields_to_store:
             vv = getattr(obj, ff)
             if hasattr(vv, "to_dict"):
                 out[ff] = vv.to_dict()
             elif hasattr(vv, "_to_dict"):
                 out[ff] = vv._to_dict()
-            else:
+            elif np.any(defaults.get(ff) != vv):
+                # Only include those scalar values that are not default.
                 out[ff] = vv
-
-        if hasattr(obj, "_store_in_to_dict"):
-            for nn in obj._store_in_to_dict:
-                ww = getattr(obj, nn)
-                if hasattr(ww, "to_dict"):
-                    out[nn] = ww.to_dict()
-                elif hasattr(ww, "_to_dict"):
-                    out[nn] = ww._to_dict()
-                else:
-                    out[nn] = ww
 
         return out
 
-    @classmethod
-    def from_dict(cls, dct, _context=None, _buffer=None, _offset=None):
+    @staticmethod
+    def _static_from_dict(cls, dct, _context=None, _buffer=None, _offset=None):
         return cls(
             **dct,
             _context=_context,
             _buffer=_buffer,
             _offset=_offset,
             _kwargs_name_check=False,
+        )
+
+    @classmethod
+    def from_dict(cls, dct, _context=None, _buffer=None, _offset=None):
+        return HybridClass._static_from_dict(
+            cls,
+            dct,
+            _context=_context,
+            _buffer=_buffer,
+            _offset=_offset,
         )
 
     def copy(self, _context=None, _buffer=None, _offset=None):
@@ -367,7 +381,25 @@ class HybridClass(metaclass=MetaHybridClass):
         return self._xobject.compile_kernels(*args, **kwargs)
 
     def __repr__(self):
-        args = [f"{fname}={getattr(self, fname)}" for fname in self._fields]
+
+        if hasattr(self, "_repr_fields"):
+            fnames = self._repr_fields
+        else:
+            fnames = []
+            if hasattr(self, "_add_to_repr"):
+                fnames += self._add_to_repr
+            fnames += [fname for fname in self._fields]
+            if hasattr(self, "_skip_in_repr"):
+                fnames = [ff for ff in fnames if ff not in self._skip_in_repr]
+
+        args = []
+        for fname in fnames:
+            vv = getattr(self, fname)
+            if isinstance(vv, float):
+                vvrepr = f"{vv:.3g}"
+            else:
+                vvrepr = repr(vv)
+            args.append(f"{fname}={vvrepr}")
         return f'{type(self).__name__}({", ".join(args)})'
 
 
