@@ -226,7 +226,7 @@ class ContextPyopencl(XContext):
         for pyname, kernel in kernel_descriptions.items():
             if kernel.c_name is None:
                 kernel.c_name = pyname
-
+            print(kernel.c_name)
             out_kernels[pyname] = KernelPyopencl(
                 function=getattr(prg, kernel.c_name),
                 description=kernel,
@@ -467,7 +467,7 @@ class KernelPyopencl(object):
         self.description = description
         self.context = context
         self.wait_on_call = wait_on_call
-
+        print("self.function:", self.function)
     def to_function_arg(self, arg, value):
         if arg.pointer:
             if hasattr(arg.atype, "_dtype"):  # it is numerical scalar
@@ -479,7 +479,8 @@ class KernelPyopencl(object):
                 elif hasattr(value, "_shape"):  # xobject array
                     raise NotImplementedError
                 else:
-                    raise NotImplementedError
+                    return value
+                    #raise NotImplementedError
             else:
                 raise ValueError(
                     f"Invalid value {value} for argument {arg.name} "
@@ -513,7 +514,7 @@ class KernelPyopencl(object):
             n_threads = kwargs[self.description.n_threads]
         else:
             n_threads = self.description.n_threads
-
+        print(arg_list, kwargs.keys(), self.function)
         event = self.function(
             self.context.queue, (n_threads,), None, *arg_list
         )
