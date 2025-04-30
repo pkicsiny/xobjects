@@ -39,10 +39,12 @@ def _for_all_test_contexts_excluding(
             f"this test: {excluding}."
         )(actual_test)
 
-    return pytest.mark.parametrize(
+    test = pytest.mark.parametrize(
         "test_context",
         test_context_names,
     )(actual_test)
+
+    return pytest.mark.context_dependent(test)
 
 
 def for_all_test_contexts(*args, **kwargs):
@@ -80,6 +82,26 @@ def requires_context(context_name: str):
     ctx_names = (type(ctx).__name__ for ctx in get_test_contexts())
 
     if {context_name} & set(ctx_names):  # proceed as normal
-        return lambda test_function: test_function
+        return pytest.mark.context_dependent
 
     return pytest.mark.skip(f"{context_name} is unavailable on this platform.")
+
+
+def fix_random_seed(seed: int):
+    """Decorator to fix the random seed for a test."""
+
+    def decorator(test_function):
+        @wraps(test_function)
+        def wrapper(*args, **kwargs):
+            import numpy as np
+
+            rng_state = np.random.get_state()
+            try:
+                np.random.seed(seed)
+                test_function(*args, **kwargs)
+            finally:
+                np.random.set_state(rng_state)
+
+        return wrapper
+
+    return decorator
