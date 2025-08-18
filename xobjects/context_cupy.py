@@ -455,7 +455,10 @@ class ContextCupy(XContext):
             with open(save_source_as, "w") as fid:
                 fid.write(specialized_source)
 
-        extra_compile_args = (*extra_compile_args, "-DXO_CONTEXT_CUDA")
+        extra_include_paths = self.get_installed_c_source_paths()
+        include_flags = [f"-I{path}" for path in extra_include_paths]
+        extra_compile_args = (*extra_compile_args, *include_flags, "-DXO_CONTEXT_CUDA")
+
         module = cupy.RawModule(
             code=specialized_source, options=extra_compile_args
         )
