@@ -40,7 +40,6 @@ class _FieldOfDressed:
         if self.isnplikearray:
             self.__get__(container=container)[:] = value
         elif hasattr(value, "_xobject"):  # value is a dressed xobject
-
             # Copy xobject data from value inside self._xobject
             # (unless same memory area or Ref and same buffer,
             #  in the latter case reference mechanism is used)
@@ -170,7 +169,7 @@ class MetaHybridClass(type):
 
             setattr(new_class, pyname, _FieldOfDressed(fname, _XoStruct))
 
-        new_class._fields = pynames_list
+        new_class._fields = [ff.name for ff in _XoStruct._fields]
 
         _XoStruct._DressingClass = new_class
 
@@ -296,6 +295,9 @@ class HybridClass(metaclass=MetaHybridClass):
 
         defaults = {}
         for field in obj._XoStruct._fields:
+            if dft := getattr(self, f"_default_{field.name}", None):
+                defaults[field.name] = dft
+                continue
             try:
                 defaults[field.name] = field.get_default()
             except (TypeError, ValueError):
@@ -339,10 +341,18 @@ class HybridClass(metaclass=MetaHybridClass):
         if _context is None and _buffer is None:
             _context = self._xobject._buffer.context
         # This makes a copy of the xobject
-        xobject = self._XoStruct(
+        new_xobject = self._XoStruct(
             self._xobject, _context=_context, _buffer=_buffer, _offset=_offset
         )
-        return self.__class__(_xobject=xobject)
+        new = self.__class__.__new__(self.__class__)
+        new.__dict__.update(self.__dict__)
+        for kk, vv in new.__dict__.items():
+            if kk == "_xobject":
+                continue
+            if hasattr(vv, "copy"):
+                new.__dict__[kk] = vv.copy()
+        new._xobject = new_xobject
+        return new
 
     @property
     def _buffer(self):
@@ -381,14 +391,17 @@ class HybridClass(metaclass=MetaHybridClass):
         return self._xobject.compile_kernels(*args, **kwargs)
 
     def __repr__(self):
-
         if hasattr(self, "_repr_fields"):
             fnames = self._repr_fields
         else:
             fnames = []
             if hasattr(self, "_add_to_repr"):
                 fnames += self._add_to_repr
-            fnames += [fname for fname in self._fields]
+            fnames += [
+                fname
+                for fname in self._xofields.keys()
+                if not fname.startswith("_")
+            ]
             if hasattr(self, "_skip_in_repr"):
                 fnames = [ff for ff in fnames if ff not in self._skip_in_repr]
 
@@ -397,6 +410,12 @@ class HybridClass(metaclass=MetaHybridClass):
             vv = getattr(self, fname)
             if isinstance(vv, float):
                 vvrepr = f"{vv:.3g}"
+            elif isinstance(vv, np.ndarray):
+                vvrepr = repr(vv)
+                # kill "array("
+                vvrepr = vvrepr.split("(", 1)[1]
+                # kill trailing ")"
+                vvrepr = vvrepr.rsplit(")", 1)[0]
             else:
                 vvrepr = repr(vv)
             args.append(f"{fname}={vvrepr}")
