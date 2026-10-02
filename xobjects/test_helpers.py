@@ -9,6 +9,7 @@ from typing import Callable, Iterable, Union
 import pytest
 
 from .context import get_context_from_string, get_test_contexts
+from .settings import settings
 
 
 def _for_all_test_contexts_excluding(
@@ -105,3 +106,38 @@ def fix_random_seed(seed: int):
         return wrapper
 
     return decorator
+
+
+def allow_kernel_compilation(
+    test_function=None, *, skip_when_forbid_compile=True
+):
+    """Allow JIT compilation for tests that intentionally compile kernels.
+
+    By default, the wrapped test is skipped when compilation is forbidden by
+    ``XSUITE_CFFI_FORBID_COMPILE``. Use ``skip_when_forbid_compile=False`` when
+    the test has more specific ``skip_if_forbid_compile()`` guards inside the
+    test.
+    """
+
+    def decorator(test_function):
+        @wraps(test_function)
+        def wrapper(*args, **kwargs):
+            if skip_when_forbid_compile:
+                skip_if_forbid_compile()
+            with settings.override(allow_kernel_compilation=True):
+                return test_function(*args, **kwargs)
+
+        return wrapper
+
+    if test_function is None:
+        return decorator
+    return decorator(test_function)
+
+
+def skip_if_forbid_compile():
+    if settings.cffi_forbid_compile:
+        pytest.skip(
+            "CFFI compilation is forbidden by "
+            "xobjects.settings.cffi_forbid_compile or equivalently the "
+            "environment variable XSUITE_CFFI_FORBID_COMPILE."
+        )

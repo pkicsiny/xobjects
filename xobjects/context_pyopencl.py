@@ -21,6 +21,7 @@ from .context import (
 )
 from .linkedarray import BaseLinkedArray
 from .specialize_source import specialize_source
+from .general import _print
 
 log = logging.getLogger(__name__)
 
@@ -44,8 +45,7 @@ except ImportError:
 
 from ._patch_pyopencl_array import _patch_pyopencl_array
 
-openclheader: List[SourceType] = [
-    """\
+openclheader: List[SourceType] = ["""\
 #ifndef XOBJ_STDINT
 typedef long           int64_t;
 typedef int            int32_t;
@@ -59,8 +59,7 @@ typedef unsigned char  uint8_t;
 #ifndef NULL
 #define NULL 0L
 #endif
-"""
-]
+"""]
 
 if _enabled:
     # order of base classes matters as it defines which __setitem__ is used
@@ -102,9 +101,9 @@ class ContextPyopencl(XContext):
     @classmethod
     def print_devices(cls):
         for ip, platform in enumerate(cl.get_platforms()):
-            print(f"Platform {ip}  : {platform.name}")
+            _print(f"Platform {ip}  : {platform.name}")
             for id, device in enumerate(platform.get_devices()):
-                print(f"Device   {ip}.{id}: {device.name}")
+                _print(f"Device   {ip}.{id}: {device.name}")
 
     def __init__(
         self, device=None, patch_pyopencl_array=True, minimum_alignment=None
@@ -230,8 +229,15 @@ class ContextPyopencl(XContext):
             with open(save_source_as, "w") as fid:
                 fid.write(specialized_source)
 
-        extra_include_paths = self.get_installed_c_source_paths()
-        include_flags = [f"-I{path}" for path in extra_include_paths]
+        (
+            # TODO: how to deal with OpenCL libraries?
+            extra_include_paths,
+            _,
+            _,
+        ) = self.get_installed_c_source_and_library_paths()
+        include_flags = [
+            f"-I{path.as_posix()}" for path in extra_include_paths
+        ]
 
         extra_compile_args = (
             *extra_compile_args,
@@ -493,6 +499,8 @@ class KernelPyopencl(object):
         print("self.function:", self.function)
     def to_function_arg(self, arg, value):
         if arg.pointer:
+            if value is None:
+                return None
             if hasattr(arg.atype, "_dtype"):  # it is numerical scalar
                 if isinstance(value, cl.Buffer):
                     return value

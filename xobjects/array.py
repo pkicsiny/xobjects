@@ -15,6 +15,7 @@ from .typeutils import (
     _to_slot_size,
     default_conf,
 )
+from .ref import is_ref, is_unionref
 from .scalar import Int64, is_scalar
 
 log = logging.getLogger(__name__)
@@ -413,7 +414,7 @@ class Array(metaclass=MetaArray):
         return info
 
     @classmethod
-    def _from_buffer(cls, buffer, offset=0):
+    def _from_buffer(cls, buffer, offset=0, container=None):
         self = object.__new__(cls)
         self._buffer = buffer
         self._offset = offset
@@ -450,7 +451,7 @@ class Array(metaclass=MetaArray):
         return self
 
     @classmethod
-    def _to_buffer(cls, buffer, offset, value, info=None):
+    def _to_buffer(cls, buffer, offset, value, info=None, container=None):
         if info is None:
             info = cls._inspect_args(value)
         value = info.value  # can be None if value contained shape info
@@ -693,16 +694,28 @@ class Array(metaclass=MetaArray):
         raise NameError("`_to_json` has been removed. Use `_to_dict` instead.")
 
     def _to_dict(self):
-        out = []
-        for v in self:  # TODO does not support multidimensional arrays
+        if hasattr(self._itemtype, "_dtype"):
+            return self.to_nparray().tolist()
+
+        out = np.empty(dtype=object, shape=self._shape)
+
+        for idx in self._iter_index():
+            idx = idx if isinstance(idx, tuple) else (idx,)
+            v = self[idx]
+
             if hasattr(v, "_to_dict"):
                 vdata = v._to_dict()
             else:
                 vdata = v
-            if self._has_refs and v is not None:
+
+            if v is not None and (
+                is_ref(self._itemtype) or is_unionref(self._itemtype)
+            ):
                 vdata = (v.__class__.__name__, vdata)
-            out.append(vdata)
-        return out
+
+            out[idx] = vdata
+
+        return out.tolist()
 
 
 def is_index(atype):

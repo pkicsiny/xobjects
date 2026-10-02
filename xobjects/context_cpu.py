@@ -3,6 +3,7 @@
 # Copyright (c) CERN, 2021.                   #
 # ########################################### #
 
+import ctypes
 import importlib.util
 import logging
 import os
@@ -13,12 +14,85 @@ from typing import Callable, Dict, List, Sequence, Tuple
 import weakref
 
 from .general import _print
+from .settings import settings
 
 import numpy as np
 import scipy as sp
 
-_forbid_compile = False
 _suppress_warnings = False
+
+_preloaded_shared_libs_cache = {}
+
+
+def _deduplicate_paths(seq):
+    return list(dict.fromkeys(Path(item).as_posix() for item in seq))
+
+
+def _preload_shared_libraries(paths):
+    # Make symbols visible to later kernel imports, and load now,
+    # not lazily: potential failure will be immediate and clearer.
+    mode = os.RTLD_GLOBAL | os.RTLD_NOW
+
+    for path in paths:
+        key = str(Path(path).expanduser().resolve())
+        if key not in _preloaded_shared_libs_cache:
+            _preloaded_shared_libs_cache[key] = ctypes.CDLL(key, mode=mode)
+
+
+def _class_allows_kernel_compilation(cls):
+    for candidate in (
+        cls,
+        getattr(cls, "_DressingClass", None),
+        getattr(cls, "_XoStruct", None),
+    ):
+        if candidate is None:
+            continue
+        if getattr(candidate, "allow_kernel_compilation", False):
+            return True
+        # Compatibility with classes from packages that have not migrated yet.
+        if getattr(candidate, "allow_no_prebuilt_kernel", False):
+            return True
+    return False
+
+
+def kernel_compilation_allowed(context=None, classes=()):
+    if classes is None:
+        classes = ()
+    elif isinstance(classes, type):
+        classes = (classes,)
+
+    if settings.allow_kernel_compilation or settings.force_kernel_compilation:
+        return True
+    if any(_class_allows_kernel_compilation(cls) for cls in classes):
+        return True
+    return getattr(context, "allow_kernel_compilation", False)
+
+
+def _is_serial_cpu_context(context):
+    if context is None or not hasattr(context, "openmp_enabled"):
+        return False
+    return context.openmp_enabled is False
+
+
+def require_prebuilt_kernel(context=None, classes=()):
+    return not kernel_compilation_allowed(
+        context, classes=classes
+    ) and _is_serial_cpu_context(context)
+
+
+def kernel_compilation_help_message():
+    return (
+        "To allow just-in-time compilation instead, as in older Xsuite "
+        "versions, set `xobjects.settings.allow_kernel_compilation = True`, "
+        "or equivalently set the environment variable "
+        "`XSUITE_ALLOW_KERNEL_COMPILATION=1`, or set "
+        "`context.allow_kernel_compilation = True`. Classes that require "
+        "just-in-time compilation can also define "
+        "`allow_kernel_compilation = True` as a class attribute. Using "
+        "just-in-time compilation instead of prebuilt kernels may require "
+        "lengthy compilation whenever a different kernel is needed."
+    )
+
 
 from .context import (
     Kernel,
@@ -126,7 +200,6 @@ class ContextCpu(XContext):
 
     Returns:
          ContextCpu: platform object.
-
     """
 
     _cffi_verbose = False
@@ -150,8 +223,7 @@ class ContextCpu(XContext):
         """
         super().__init__()
         self.omp_num_threads = omp_num_threads
-        if omp_num_threads == 0:
-            self.allow_prebuilt_kernels = True
+        self.allow_prebuilt_kernels = True
 
     def __str__(self):
         if not self.openmp_enabled:
@@ -171,6 +243,10 @@ class ContextCpu(XContext):
         save_source_as=None,
         extra_compile_args: Sequence[str] = (),
         extra_link_args: Sequence[str] = (),
+        extra_include_dirs: Sequence[str] = (),
+        extra_libraries: Sequence[str] = (),
+        extra_library_dirs: Sequence[str] = (),
+        preload_libraries: Sequence[str] = (),
         extra_cdef="",
         extra_classes=(),
         extra_headers=(),
@@ -196,6 +272,11 @@ class ContextCpu(XContext):
                 code. Default is ```None```.
             extra_compile_args: Extra arguments to be passed to the compiler.
             extra_link_args: Extra arguments to be passed to the linker.
+            extra_include_dirs: Extra include directories passed to cffi.
+            extra_libraries: Extra libraries passed to cffi.
+            extra_library_dirs: Extra library directories passed to cffi.
+            preload_libraries: Shared libraries to load before importing the
+                compiled kernel module.
             extra_cdef: Extra C definitions to be passed to cffi.
             extra_classes: Extra xobjects classes whose API is needed.
             extra_headers: Extra headers to be added to the source code.
@@ -255,6 +336,10 @@ class ContextCpu(XContext):
             save_source_as=save_source_as,
             extra_compile_args=extra_compile_args,
             extra_link_args=extra_link_args,
+            extra_include_dirs=extra_include_dirs,
+            extra_libraries=extra_libraries,
+            extra_library_dirs=extra_library_dirs,
+            preload_libraries=preload_libraries,
             extra_cdef=extra_cdef,
             extra_classes=extra_classes,
             extra_headers=extra_headers,
@@ -273,11 +358,22 @@ class ContextCpu(XContext):
         save_source_as=None,
         extra_compile_args=(),
         extra_link_args=(),
+        extra_include_dirs=(),
+        extra_libraries=(),
+        extra_library_dirs=(),
+        preload_libraries=(),
         extra_cdef="",
         extra_classes=(),
         extra_headers=(),
         compile=True,  # noqa
+        compiler_language="c",
+        extra_source_files=None,
     ) -> Dict[Tuple[str, tuple], "KernelCpu"]:
+        # extra_source_files: additional source files compiled as separate translation
+        # units and linked into the module (cffi's set_source(sources=...)), as opposed
+        # to `sources`, which are concatenated into the single generated translation unit.
+        # Use this when a source must not share a TU with the rest (e.g. to avoid symbol/ADL clashes).
+        extra_source_files = extra_source_files or ()
         extra_compile_args += ("-O3", "-Wno-unused-function")
         extra_link_args += ("-O3",)
 
@@ -313,8 +409,12 @@ class ContextCpu(XContext):
             cdefs = "\n".join(cls._gen_c_decl({}) for cls in classes)
             cdefs += "\n" + extra_cdef
 
-            if _forbid_compile:
-                raise RuntimeError("Compilation is forbidden")
+            if settings.cffi_forbid_compile:
+                raise RuntimeError(
+                    "CFFI compilation is forbidden by "
+                    "xobjects.settings.cffi_forbid_compile or equivalently "
+                    "the environment variable XSUITE_CFFI_FORBID_COMPILE."
+                )
 
             so_file = self.compile_kernel(
                 module_name,
@@ -324,6 +424,11 @@ class ContextCpu(XContext):
                 extra_compile_args,
                 extra_link_args,
                 containing_dir=containing_dir,
+                compiler_language=compiler_language,
+                extra_source_files=extra_source_files,
+                extra_include_dirs=extra_include_dirs,
+                extra_libraries=extra_libraries,
+                extra_library_dirs=extra_library_dirs,
             )
 
             try:
@@ -332,6 +437,7 @@ class ContextCpu(XContext):
                     module_name,
                     kernel_descriptions,
                     containing_dir=containing_dir,
+                    preload_libraries=preload_libraries,
                 )
             finally:
                 # Whether loaded successfully or not, delete the so
@@ -363,21 +469,32 @@ class ContextCpu(XContext):
         module_name: str,
         kernel_descriptions: Dict[str, Kernel],
         containing_dir=".",
+        preload_libraries=(),
     ) -> Dict[Tuple[str, tuple], "KernelCpu"]:
         """
         Import a compiled module `module_name` located in `containing_dir`
         (by default it is the current working directory), and add the kernels
         from the module, as defined in `kernel_descriptions`, to the context.
-        Returns the path to the loaded so file.
+
+        Args:
+            module_name: Compiled extension module name.
+            kernel_descriptions: Mapping from Python names to Kernel objects.
+            containing_dir: Directory containing the compiled module.
+            preload_libraries: Shared libraries to load before module import.
+
+        Returns:
+            Mapping from Python kernel names to KernelCpu objects.
         """
         module = self._load_kernel_module(
             name=module_name,
             containing_dir=containing_dir,
+            preload_libraries=preload_libraries,
         )
         out_kernels = {}
         for pyname, kernel_desc in kernel_descriptions.items():
+            c_name = kernel_desc.c_name or pyname
             out_kernels[pyname] = KernelCpu(
-                function=getattr(module.lib, kernel_desc.c_name),
+                function=getattr(module.lib, c_name),
                 description=kernel_desc,
                 ffi_interface=module.ffi,
                 context=self,
@@ -393,6 +510,11 @@ class ContextCpu(XContext):
         extra_compile_args,
         extra_link_args,
         containing_dir=".",
+        compiler_language="c",
+        extra_source_files=(),
+        extra_include_dirs=(),
+        extra_libraries=(),
+        extra_library_dirs=(),
     ) -> Path:
         ffi_interface = cffi.FFI()
         ffi_interface.cdef(cdefs)
@@ -408,12 +530,24 @@ class ContextCpu(XContext):
                 log.debug(f"cffi def {pyname} {signature}")
 
         if self.openmp_enabled:
-            ffi_interface.cdef("void omp_set_num_threads(int);")
-            ffi_interface.cdef("int omp_get_max_threads();")
+            # The wrapper is needed to ensure that the omp functions are linked
+            ffi_interface.cdef("void xo_omp_set_num_threads(int);")
+            ffi_interface.cdef("int xo_omp_get_max_threads();")
+            specialized_source += """
+                void xo_omp_set_num_threads(int num_threads) {
+                    omp_set_num_threads(num_threads);
+                }
 
-        # Compile
-        xtr_compile_args = ["-std=c99", "-DXO_CONTEXT_CPU"]
-        xtr_link_args = ["-std=c99", "-DXO_CONTEXT_CPU"]
+                int xo_omp_get_max_threads(void) {
+                    return omp_get_max_threads();
+                }
+                """
+
+        # Compile (Default is C99). compiler_language="c++" builds the TU as C++17
+        # (need to link header-only C++ dependencies, i.e. the TPSA library).
+        std_flag = "-std=c++17" if compiler_language == "c++" else "-std=c99"
+        xtr_compile_args = [std_flag, "-DXO_CONTEXT_CPU"]
+        xtr_link_args = [std_flag, "-DXO_CONTEXT_CPU"]
         xtr_compile_args += extra_compile_args
         xtr_link_args += extra_link_args
 
@@ -426,10 +560,21 @@ class ContextCpu(XContext):
             xtr_compile_args.append("-DXO_CONTEXT_CPU_SERIAL")
             xtr_link_args.append("-DXO_CONTEXT_CPU_SERIAL")
 
-        extra_include_paths = self.get_installed_c_source_paths()
-        include_flags = [f"-I{path}" for path in extra_include_paths]
-        xtr_compile_args.extend(include_flags)
-        xtr_link_args.extend(include_flags)
+        (
+            installed_include_paths,
+            installed_libraries,
+            installed_library_paths,
+        ) = self.get_installed_c_source_and_library_paths()
+
+        include_paths = _deduplicate_paths(
+            [*installed_include_paths, *extra_include_dirs]
+        )
+        libraries = _deduplicate_paths(
+            [*installed_libraries, *extra_libraries]
+        )
+        library_paths = _deduplicate_paths(
+            [*installed_library_paths, *extra_library_dirs]
+        )
 
         if os.name == "nt":  # windows
             # TODO: to be handled properly
@@ -443,6 +588,11 @@ class ContextCpu(XContext):
         ffi_interface.set_source(
             module_name,
             specialized_source,
+            include_dirs=[Path(path).as_posix() for path in include_paths],
+            libraries=list(libraries),
+            library_dirs=[Path(path).as_posix() for path in library_paths],
+            source_extension=".cpp" if compiler_language == "c++" else ".c",
+            sources=list(extra_source_files),
             extra_compile_args=xtr_compile_args,
             extra_link_args=xtr_link_args,
         )
@@ -458,15 +608,17 @@ class ContextCpu(XContext):
                 _print("Done compiling ContextCpu kernels.")
             return Path(output_file)
         finally:
-            # Clean temp files
-            files_to_remove = [
-                module_name + ".c",
-                module_name + ".o",
-            ]
+            # Clean temp files (the generated source has the language's extension).
+            if not settings.cffi_keep_build_files:
+                src_ext = ".cpp" if compiler_language == "c++" else ".c"
+                files_to_remove = [
+                    module_name + src_ext,
+                    module_name + ".o",
+                ]
 
-            for ff in files_to_remove:
-                if os.path.exists(ff):
-                    os.remove(ff)
+                for ff in files_to_remove:
+                    if os.path.exists(ff):
+                        os.remove(ff)
 
     def _build_sources(
         self,
@@ -509,19 +661,26 @@ class ContextCpu(XContext):
         self,
         name: str,
         containing_dir=".",
+        preload_libraries=(),
     ):
         """
         Load a kernel from a stored shared object file.
+
+        Args:
+            name: Compiled extension module name.
+            containing_dir: Directory containing the shared object.
+            preload_libraries: Shared libraries to load before module import.
         """
         so_path = _so_for_module_name(name, containing_dir)
+        _preload_shared_libraries(preload_libraries)
         # Import the compiled module
         spec = importlib.util.spec_from_file_location(name, so_path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
 
         if self.openmp_enabled:
-            self.omp_set_num_threads = module.lib.omp_set_num_threads
-            self.omp_get_max_threads = module.lib.omp_get_max_threads
+            self.omp_set_num_threads = module.lib.xo_omp_set_num_threads
+            self.omp_get_max_threads = module.lib.xo_omp_get_max_threads
 
         return module
 
@@ -760,10 +919,8 @@ class BufferNumpy(XBuffer):
         value = nplike_to_numpy(value)
         if dest_dtype != value.dtype:
             value = value.astype(dtype=dest_dtype)  # make a copy
-        src = value.view("int8")
-        self.buffer[offset : offset + src.nbytes] = value.flatten().view(
-            "int8"
-        )
+        src = value.flatten().view("int8")
+        self.buffer[offset : offset + src.nbytes] = src
 
     def to_bytearray(self, offset, nbytes):
         """copy in byte array: used in update_from_xbuffer"""
@@ -791,6 +948,8 @@ class KernelCpu:
 
     def to_function_arg(self, arg, value):
         if arg.pointer:
+            if value is None:
+                return self.ffi_interface.NULL
             if hasattr(arg.atype, "_dtype"):  # it is numerical scalar
                 if hasattr(value, "dtype"):  # nparray
                     slice_first_elem = value[tuple(value.ndim * [slice(0, 1)])]
@@ -883,8 +1042,8 @@ class FFTCpu(object):
                 direction="FFTW_BACKWARD",
                 flags=("FFTW_MEASURE",),
             )
-            print(f"fftw simd_aligned={self.fftw.simd_aligned}")
-            print(f"ifftw simd_aligned={self.fftw.simd_aligned}")
+            _print(f"fftw simd_aligned={self.fftw.simd_aligned}")
+            _print(f"ifftw simd_aligned={self.fftw.simd_aligned}")
         else:
             # I perform one fft to have numpy cache the plan
             _ = np.fft.ifftn(np.fft.fftn(data, axes=axes), axes=axes)

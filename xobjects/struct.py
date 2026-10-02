@@ -45,6 +45,8 @@ Field instance:
 
 
 """
+
+import copy
 import logging
 from typing import Callable, Optional
 
@@ -57,13 +59,26 @@ from .typeutils import (
     default_conf,
 )
 
-from .general import Print
+from .settings import settings
 from .scalar import Int64
 from .array import Array
 from .context import Source, Arg, Kernel
 from .context_cpu import ContextCpu
+from .ref import is_unionref
 
 log = logging.getLogger(__name__)
+
+
+class ThisClass:  # Place holder
+    pass
+
+
+def _resolve_kernel_arg_type(owner, atype):
+    if atype is ThisClass:
+        return owner
+    if hasattr(atype, "_XoStruct"):
+        return atype._XoStruct
+    return atype
 
 
 class Field:
@@ -89,7 +104,9 @@ class Field:
             return self
         else:
             ftype, offset = self.get_offset(instance)
-            return ftype._from_buffer(instance._buffer, offset)
+            return ftype._from_buffer(
+                instance._buffer, offset, container=instance
+            )
 
     def __set__(self, instance, value):
         """
@@ -105,7 +122,9 @@ class Field:
             self.__get__(instance)._update(value)
         else:  # TODO check if below is really needed
             ftype, offset = self.get_offset(instance)
-            ftype._to_buffer(instance._buffer, offset, value)
+            ftype._to_buffer(
+                instance._buffer, offset, value, container=instance
+            )
 
     def get_offset(self, instance):  # compatible with info
         if self.is_reference:
@@ -264,7 +283,26 @@ class MetaStruct(type):
         if "_kernels" not in data.keys():
             data["_kernels"] = {}
 
-        return type.__new__(cls, name, bases, data)
+        new_class = type.__new__(cls, name, bases, data)
+        resolved_kernels = {}
+        for kernel_name, kernel in (new_class._kernels or {}).items():
+            resolved_kernel = copy.copy(kernel)
+            resolved_kernel.args = []
+            for arg in kernel.args:
+                resolved_arg = copy.copy(arg)
+                resolved_arg.atype = _resolve_kernel_arg_type(
+                    new_class, resolved_arg.atype
+                )
+                resolved_kernel.args.append(resolved_arg)
+            if isinstance(kernel.ret, Arg):
+                resolved_ret = copy.copy(kernel.ret)
+                resolved_ret.atype = _resolve_kernel_arg_type(
+                    new_class, resolved_ret.atype
+                )
+                resolved_kernel.ret = resolved_ret
+            resolved_kernels[kernel_name] = resolved_kernel
+        new_class._kernels = resolved_kernels
+        return new_class
 
     def __getitem__(cls, shape):
         return Array.mk_arrayclass(cls, shape)
@@ -287,7 +325,7 @@ class Struct(metaclass=MetaStruct):
         pass
 
     @classmethod
-    def _from_buffer(cls, buffer, offset=0):
+    def _from_buffer(cls, buffer, offset=0, container=None):
         self = object.__new__(cls)
         self._buffer = buffer
         self._offset = offset
@@ -302,7 +340,7 @@ class Struct(metaclass=MetaStruct):
         return self
 
     @classmethod
-    def _to_buffer(cls, buffer, offset, value, info=None):
+    def _to_buffer(cls, buffer, offset, value, info=None, container=None):
         if isinstance(value, cls) and not cls._has_refs:  # binary copy
             buffer.update_from_xbuffer(
                 offset, value._buffer, value._offset, value._size
@@ -373,6 +411,15 @@ class Struct(metaclass=MetaStruct):
         out = {}
         for field in self._fields:
             v = field.__get__(self)
+            if is_unionref(field.ftype):
+                if v is None:
+                    out[field.name] = None
+                else:
+                    classname = v.__class__.__name__
+                    if hasattr(v, "_to_dict"):
+                        v = v._to_dict()
+                    out[field.name] = (classname, v)
+                continue
             if hasattr(v, "_to_dict"):
                 v = v._to_dict()
             out[field.name] = v
@@ -475,6 +522,45 @@ class Struct(metaclass=MetaStruct):
         extra_classes=(),
         extra_compile_args=(),
     ):
+        if (
+            context.allow_prebuilt_kernels
+            and not settings.force_kernel_compilation
+        ):
+            with settings.override(print_mode="suppress"):
+                try:
+                    from xsuite import (
+                        get_suitable_kernel,
+                        PREBUILT_KERNELS_LOCATION,
+                    )
+
+                    kernel_info = get_suitable_kernel(
+                        config={},
+                        tracker_element_classes=[],
+                        classes=list(extra_classes) + [cls],
+                        context=context,
+                    )
+                except ImportError as err:
+                    from . import context_cpu
+
+                    if not context_cpu.require_prebuilt_kernel(
+                        context, classes=list(extra_classes) + [cls]
+                    ):
+                        kernel_info = None
+                    else:
+                        raise ImportError(
+                            "Xsuite is required to load prebuilt kernels but could "
+                            "not be imported. Please install it with "
+                            f"`pip install xsuite`. "
+                            f"{context_cpu.kernel_compilation_help_message()}"
+                        ) from err
+            if kernel_info:
+                kernels = context.kernels_from_file(
+                    module_name=kernel_info["module_name"],
+                    containing_dir=PREBUILT_KERNELS_LOCATION,
+                    kernel_descriptions=cls._kernels,
+                )
+                context.kernels.update(kernels)
+
         if only_if_needed:
             all_found = True
             for kk, kernel_description in cls._kernels.items():

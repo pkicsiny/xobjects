@@ -10,6 +10,7 @@ import numpy as np
 from .struct import Struct
 from .typeutils import context_default
 from .ref import Ref
+from .raw_union import RawUnion
 
 
 class _FieldOfDressed:
@@ -88,6 +89,8 @@ class JEncoder(json.JSONEncoder):
             return obj.tolist()
         elif np.issubdtype(type(obj), np.integer):
             return int(obj)
+        elif isinstance(obj, (np.bool_)):
+            return bool(obj)
         else:
             return json.JSONEncoder.default(self, obj)
 
@@ -125,8 +128,11 @@ class MetaHybridClass(type):
 
         # Take xofields from data['_xofields'] or from bases
         xofields = _build_xofields_dict(bases, data)
+        xostruct_data = xofields.copy()
+        if "_kernels" in data.keys():
+            xostruct_data["_kernels"] = data["_kernels"]
 
-        _XoStruct = type(_XoStruct_name, (Struct,), xofields)
+        _XoStruct = type(_XoStruct_name, (Struct,), xostruct_data)
 
         if "_rename" in data.keys():
             rename = data["_rename"]
@@ -182,14 +188,7 @@ class MetaHybridClass(type):
             new_class._XoStruct._depends_on.extend(data["_depends_on"])
 
         if "_kernels" in data.keys():
-            kernels = data["_kernels"].copy()
-            for nn, kk in kernels.items():
-                for aa in kk.args:
-                    if aa.atype is ThisClass:
-                        aa.atype = new_class._XoStruct
-                    if isclass(aa.atype) and issubclass(aa.atype, HybridClass):
-                        aa.atype = aa.atype._XoStruct
-            new_class._XoStruct._kernels.update(kernels)
+            new_class._kernels = new_class._XoStruct._kernels
 
         for ii, tt in enumerate(new_class._XoStruct._depends_on):
             if isclass(tt) and issubclass(tt, HybridClass):
@@ -299,7 +298,12 @@ class HybridClass(metaclass=MetaHybridClass):
                 defaults[field.name] = dft
                 continue
             try:
-                defaults[field.name] = field.get_default()
+                default = field.get_default()
+                if isinstance(default, RawUnion):
+                    # A raw union can expose a scalar when read as a field.
+                    default = type(default)._from_buffer(
+                        default._buffer, default._offset)
+                defaults[field.name] = default
             except (TypeError, ValueError):
                 # The above can fail with different error types
                 # if a field type is dynamic.
@@ -420,7 +424,3 @@ class HybridClass(metaclass=MetaHybridClass):
                 vvrepr = repr(vv)
             args.append(f"{fname}={vvrepr}")
         return f'{type(self).__name__}({", ".join(args)})'
-
-
-class ThisClass:  # Place holder
-    pass

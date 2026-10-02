@@ -9,7 +9,6 @@ import numpy as np
 
 from .typeutils import Info, dispatch_arg, allocate_on_buffer, default_conf
 from .scalar import Int64
-from .array import Array
 
 log = logging.getLogger(__name__)
 
@@ -38,7 +37,7 @@ class Ref(metaclass=MetaRef):
 
         self._size = 8
 
-    def _from_buffer(self, buffer, offset=0):
+    def _from_buffer(self, buffer, offset=0, container=None):
         refoffset = Int64._from_buffer(buffer, offset)
         if refoffset == NULLVALUE:
             return None
@@ -46,7 +45,7 @@ class Ref(metaclass=MetaRef):
             refoffset += offset  # from relative to absolute offset
             return self._reftype._from_buffer(buffer, refoffset)
 
-    def _to_buffer(self, buffer, offset, value, info=None):
+    def _to_buffer(self, buffer, offset, value, info=None, container=None):
         # Get/set content
         if value is None:
             refoffset = NULLVALUE  # NULL value
@@ -72,6 +71,8 @@ class Ref(metaclass=MetaRef):
         return Info(size=self._size)
 
     def __getitem__(self, shape):
+        from .array import Array
+
         return Array.mk_arrayclass(self, shape)
 
     def _gen_data_paths(self, base=None):
@@ -152,7 +153,7 @@ class MetaUnionRef(type):
         # If no match found:
         raise TypeError(f"Invalid id: {typeid}!")
 
-    def _from_buffer(cls, buffer, offset=0):
+    def _from_buffer(cls, buffer, offset=0, container=None):
         refoffset, typeid = Int64._array_from_buffer(buffer, offset, 2)
         if refoffset == NULLVALUE:
             return None
@@ -174,7 +175,7 @@ class MetaUnionRef(type):
         info = Info(size=cls._size)
         return info
 
-    def _to_buffer(cls, buffer, offset, value, info=None):
+    def _to_buffer(cls, buffer, offset, value, info=None, container=None):
         if isinstance(value, cls):  # binary copy
             buffer.update_from_xbuffer(
                 offset, value._buffer, value._offset, value._size
@@ -182,7 +183,9 @@ class MetaUnionRef(type):
         else:
             if value is None:
                 xobj = None
-            elif isinstance(value, tuple):
+            elif isinstance(
+                value, (tuple, list)
+            ):  # accept list as it might be coming from JSON
                 if len(value) == 0:
                     xobj = None
                     typeid = None
@@ -213,6 +216,8 @@ class MetaUnionRef(type):
                 Int64._array_to_buffer(buffer, offset, ref)
 
     def __getitem__(cls, shape):
+        from .array import Array
+
         return Array.mk_arrayclass(cls, shape)
 
     def _pre_init(cls, *arg, **kwargs):
@@ -298,6 +303,8 @@ class UnionRef(metaclass=MetaUnionRef):
 
     def _to_dict(self):
         v = self.get()
+        if v is None:
+            return None
         classname = v.__class__.__name__
         if hasattr(v, "_to_dict"):
             v = v._to_dict()

@@ -6,7 +6,11 @@ import cffi
 import numpy as np
 
 import xobjects as xo
-from xobjects.test_helpers import for_all_test_contexts, requires_context
+from xobjects.test_helpers import (
+    allow_kernel_compilation,
+    for_all_test_contexts,
+    requires_context,
+)
 
 
 def test_static_struct_def():
@@ -222,8 +226,7 @@ def test_kernel_namings():
         var_mult_3 = xo.Float64[:]
         var_mult_4 = xo.Float64[:]
 
-        _extra_c_sources = [
-            r"""
+        _extra_c_sources = [r"""
 double mul(MyStruct stru) {
     int32_t n = MyStruct_get_n(stru);
     double* var_mult_1 = MyStruct_getp1_var_mult_1(stru, 0);
@@ -258,8 +261,7 @@ double mult_four(MyStruct stru) {
         y+= var_mult_1[tid] * var_mult_2[tid] * var_mult_3[tid] * var_mult_4[tid];
         }
     return y;
-    }"""
-        ]
+    }"""]
 
     kernel_descriptions = {
         "mul": xo.Kernel(
@@ -301,6 +303,7 @@ double mult_four(MyStruct stru) {
 
 
 @requires_context("ContextCpu")
+@allow_kernel_compilation
 def test_compile_kernels_only_if_needed(tmp_path, mocker):
     """Test the use case of xtrack.
 
@@ -316,15 +319,13 @@ def test_compile_kernels_only_if_needed(tmp_path, mocker):
             "x": xo.Float64,
             "y": xo.Float64,
         }
-        _extra_c_sources = [
-            """
+        _extra_c_sources = ["""
             /*gpufun*/ double myfun(TestClassData tc){
                 double x = TestClassData_get_x(tc);
                 double y = TestClassData_get_y(tc);
                 return x * y;
             }
-        """
-        ]
+        """]
         _kernels = {
             "myfun": xo.Kernel(
                 args=[
@@ -337,6 +338,8 @@ def test_compile_kernels_only_if_needed(tmp_path, mocker):
         def myfun(self):
             return self._context.kernels.myfun(tc=self)
 
+    assert TestClass._kernels["myfun"].args[0].atype is TestClass._XoStruct
+
     tc = TestClass(x=3, y=4, _context=test_context)
     tc.compile_kernels(only_if_needed=True)
     assert tc.myfun() == 12
@@ -347,3 +350,34 @@ def test_compile_kernels_only_if_needed(tmp_path, mocker):
     tc.compile_kernels(only_if_needed=True)
     assert tc.myfun() == 35
     cffi_compile.assert_not_called()
+
+
+@requires_context("ContextCpu")
+@allow_kernel_compilation
+def test_thisclass_placeholder_on_struct():
+    test_context = xo.ContextCpu()
+
+    class TestStruct(xo.Struct):
+        x = xo.Float64
+        y = xo.Float64
+
+        _extra_c_sources = ["""
+            /*gpufun*/ double myfun(TestStruct tc){
+                double x = TestStruct_get_x(tc);
+                double y = TestStruct_get_y(tc);
+                return x * y;
+            }
+        """]
+        _kernels = {
+            "myfun": xo.Kernel(
+                args=[xo.Arg(xo.ThisClass, name="tc")],
+                ret=xo.Arg(xo.Float64),
+            ),
+        }
+
+    assert TestStruct._kernels["myfun"].args[0].atype is TestStruct
+
+    ts = TestStruct(x=3, y=4, _context=test_context)
+    ts.compile_kernels()
+
+    assert test_context.kernels.myfun(tc=ts) == 12
